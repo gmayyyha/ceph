@@ -202,11 +202,21 @@ int DiffIterate<I>::diff_iterate(I *ictx, uint64_t from_snap_id,
                                  bool include_parent, bool whole_object,
                                  int (*cb)(uint64_t, size_t, int, void *),
                                  void *arg) {
+  return diff_iterate2(ictx, from_snap_id, off, len, include_parent, whole_object, false, cb, arg);
+}
+
+template <typename I>
+int DiffIterate<I>::diff_iterate2(I *ictx, uint64_t from_snap_id,
+                                 uint64_t off, uint64_t len,
+                                 bool include_parent, bool whole_object, bool fast,
+                                 int (*cb)(uint64_t, size_t, int, void *),
+                                 void *arg) {
   ldout(ictx->cct, 10) << "from_snap_id=" << from_snap_id
                        << ", off=" << off
                        << ", len=" << len
                        << ", include_parent=" << include_parent
                        << ", whole_object=" << whole_object
+		       << ", fast=" << fast
                        << dendl;
 
   if (!ictx->data_ctx.is_valid()) {
@@ -259,7 +269,7 @@ int DiffIterate<I>::diff_iterate(I *ictx, uint64_t from_snap_id,
   }
 
   DiffIterate command(*ictx, from_snap_id, off, len,
-		      include_parent, whole_object, cb, arg);
+		      include_parent, whole_object, fast, cb, arg);
   r = command.execute();
   return r;
 }
@@ -321,10 +331,12 @@ int DiffIterate<I>::execute() {
 
   int r;
   bool fast_diff_enabled = false;
+  bool object_diff_state_valid = false;
+  const bool need_object_diff_state = (m_whole_object || m_fast);
   uint64_t start_object_no, end_object_no;
   BitVector<2> object_diff_state;
   interval_set<uint64_t> parent_diff;
-  if (m_whole_object) {
+  if (need_object_diff_state ) {
     std::tie(start_object_no, end_object_no) = calc_object_diff_range();
 
     C_SaferCond ctx;
@@ -337,9 +349,14 @@ int DiffIterate<I>::execute() {
     if (r < 0) {
       ldout(cct, 5) << "fast diff disabled" << dendl;
     } else {
-      ldout(cct, 5) << "fast diff enabled" << dendl;
       ceph_assert(object_diff_state.size() == end_object_no - start_object_no);
-      fast_diff_enabled = true;
+      object_diff_state_valid = true;
+      ldout(cct, 5) << "object diff state ready" << dendl;
+
+      if (m_whole_object) {
+        ldout(cct, 5) << "fast diff enabled" << dendl;
+        fast_diff_enabled = true;
+      }
 
       // check parent overlap only if we are comparing to the beginning of time
       if (m_include_parent && from_snap_id == 0) {
@@ -429,6 +446,30 @@ int DiffIterate<I>::execute() {
         if (r < 0) {
           return r;
         }
+      }
+    } else if (m_fast && object_diff_state_valid) {
+      striper::LightweightObjectExtents object_extents;
+      io::util::area_to_object_extents(&m_image_ctx, off, read_len,
+                                       io::ImageArea::DATA, 0, &object_extents);
+
+      for (const auto& oe : object_extents) {
+        ceph_assert(oe.object_no >= start_object_no &&
+                    oe.object_no < end_object_no);
+        uint8_t diff_state = object_diff_state[oe.object_no - start_object_no];
+
+        ldout(cct, 20) << "fast fallback object "
+                       << util::data_object_name(&m_image_ctx, oe.object_no)
+                       << ": diff_state=" << (int)diff_state << dendl;
+	if (diff_state != object_map::DIFF_STATE_HOLE) {
+	  auto diff_object = new C_DiffObject<I>(m_image_ctx, diff_context, off,
+                                             read_len);
+          diff_object->send();
+
+          if (diff_context.throttle.pending_error()) {
+            r = diff_context.throttle.wait_for_ret();
+            return r;
+          }
+	}
       }
     } else {
       auto diff_object = new C_DiffObject<I>(m_image_ctx, diff_context, off,

@@ -37,6 +37,7 @@ static int get_image_disk_usage(const std::string& name,
                                 const std::string& from_snap_name,
                                 librbd::Image &image,
                                 bool exact,
+				bool fast,
                                 uint64_t size,
                                 uint64_t *used_size){
 
@@ -59,7 +60,7 @@ static int get_image_disk_usage(const std::string& name,
   }
 
   *used_size = 0;
-  r = image.diff_iterate2(from, 0, size, false, !exact,
+  r = image.diff_iterate4(from, 0, size, false, !exact, fast,
                           &disk_usage_callback, used_size);
   if (r < 0) {
     std::cerr << "rbd: failed to iterate diffs: " << cpp_strerror(r)
@@ -103,7 +104,7 @@ void format_image_disk_usage(const std::string& name,
 static int do_disk_usage(librbd::RBD &rbd, librados::IoCtx &io_ctx,
                          const char *imgname, const char *snapname,
                          const char *from_snapname, bool exact, Formatter *f,
-                         bool merge_snap) {
+                         bool merge_snap, bool fast) {
   std::vector<librbd::image_spec_t> images;
   int r = rbd.list2(io_ctx, &images);
   if (r == -ENOENT) {
@@ -230,7 +231,7 @@ static int do_disk_usage(librbd::RBD &rbd, librados::IoCtx &io_ctx,
       if (imgname == nullptr || found_from_snap ||
          (found_from_snap && snapname != nullptr && snap->name == snapname)) {
 
-        r = get_image_disk_usage(image_spec.name, snap->name, last_snap_name, snap_image, exact, snap->size, &used_size);
+        r = get_image_disk_usage(image_spec.name, snap->name, last_snap_name, snap_image, exact, fast, snap->size, &used_size);
         if (r < 0) {
           goto out;
         }
@@ -259,7 +260,7 @@ static int do_disk_usage(librbd::RBD &rbd, librados::IoCtx &io_ctx,
     }
 
     if (snapname == NULL) {
-      r = get_image_disk_usage(image_spec.name, "", last_snap_name, image, exact, info.size, &used_size);
+      r = get_image_disk_usage(image_spec.name, "", last_snap_name, image, exact, fast, info.size, &used_size);
       if (r < 0) {
         goto out;
       }
@@ -316,7 +317,9 @@ void get_arguments(po::options_description *positional,
      "snapshot starting point")
     ("exact", po::bool_switch(), "compute exact disk usage (slow)")
     ("merge-snapshots", po::bool_switch(),
-     "merge snapshot sizes with its image");
+     "merge snapshot sizes with its image")
+    ("fast", po::bool_switch(),
+     "Skip known hole objects when exact path falls back to object diff");
 }
 
 int execute(const po::variables_map &vm,
@@ -360,7 +363,8 @@ int execute(const po::variables_map &vm,
                     snap_name.empty() ? nullptr : snap_name.c_str(),
                     from_snap_name.empty() ? nullptr : from_snap_name.c_str(),
                     vm["exact"].as<bool>(), formatter.get(),
-                    vm["merge-snapshots"].as<bool>());
+                    vm["merge-snapshots"].as<bool>(),
+		    vm["fast"].as<bool>());
   if (r < 0) {
     std::cerr << "rbd: du failed: " << cpp_strerror(r) << std::endl;
     return r;

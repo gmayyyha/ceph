@@ -1241,6 +1241,13 @@ CEPH_RBD_API int rbd_diff_iterate(rbd_image_t image,
 		                  uint64_t ofs, uint64_t len,
 		                  int (*cb)(uint64_t, size_t, int, void *),
                                   void *arg);
+CEPH_RBD_API int rbd_diff_iterate4(rbd_image_t image,
+		                   const char *fromsnapname,
+		                   uint64_t ofs, uint64_t len,
+                                   uint8_t include_parent, uint8_t whole_object,
+				   bool fast,
+		                   int (*cb)(uint64_t, size_t, int, void *),
+                                   void *arg);
 CEPH_RBD_API int rbd_diff_iterate2(rbd_image_t image,
 		                   const char *fromsnapname,
 		                   uint64_t ofs, uint64_t len,
